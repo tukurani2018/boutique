@@ -528,7 +528,12 @@
       const msg = buildEnquiryMessage(p, cur);
       let handled = false;
 
-      if(p.image && navigator.clipboard && window.ClipboardItem){
+      if(p.imageUrl){
+        window.open(waLink(state.settings.whatsapp, msg), '_blank', 'noopener');
+        handled = true;
+      }
+
+      if(!handled && p.image && navigator.clipboard && window.ClipboardItem){
         try{
           const canvas = await generateCardImage(p, cur, state.settings.shopName);
           const pngBlob = await new Promise(res=>canvas.toBlob(res, 'image/png'));
@@ -602,15 +607,16 @@
       const subcategory = fd.get('subcategory') || "";
       const price = fd.get('price');
       const description = fd.get('description').trim();
+      const imageUrl = (fd.get('imageUrl')||'').trim();
       const err = form.querySelector('.error-msg');
       if(!name || !price){ err.textContent='Name and price are required.'; err.style.display='block'; return; }
       const existing = state.modal.product;
       const image = state.modal.imgData || null;
       if(existing){
         const idx = state.products.findIndex(p=>p.id===existing.id);
-        state.products[idx] = {...existing, name, category, subcategory, price:Number(price), description, image};
+        state.products[idx] = {...existing, name, category, subcategory, price:Number(price), description, image, imageUrl};
       }else{
-        state.products.unshift({ id:uid(), name, category, subcategory, price:Number(price), description, image, createdAt:Date.now() });
+        state.products.unshift({ id:uid(), name, category, subcategory, price:Number(price), description, image, imageUrl, createdAt:Date.now() });
       }
       await saveProducts();
       state.modal=null;
@@ -795,6 +801,7 @@
     if(catLine) lines.push(`Category: ${catLine}`);
     lines.push(`Price: ${currency}${p.price}`);
     if(p.description) lines.push(`Details: ${p.description}`);
+    if(p.imageUrl) lines.push(``, p.imageUrl);
     lines.push(``, `Is it available?`);
     return lines.join('\n');
   }
@@ -812,7 +819,7 @@
         <div class="card-price">${iconTag()}${currency}${p.price}</div>
         ${p.description ? `<div class="card-desc">${esc(p.description)}</div>` : ''}
         <button class="wa-btn" data-action="enquire-whatsapp" data-id="${p.id}">${iconWA()} Enquire on WhatsApp</button>
-        ${p.image ? `<div class="save-photo-btn">Opens your chat with us directly & copies the photo — just paste it in (long-press → Paste) and send</div>` : ''}
+        ${p.imageUrl ? `<div class="save-photo-btn">Opens your chat directly — the photo preview comes through automatically</div>` : (p.image ? `<div class="save-photo-btn">Opens your chat with us directly & copies the photo — just paste it in (long-press → Paste) and send</div>` : '')}
       </div>
     </div>`;
   }
@@ -1076,6 +1083,11 @@
             <div class="field">
               <label>Description (optional)</label>
               <textarea name="description" placeholder="Fabric, fit, size notes...">${p ? esc(p.description||'') : ''}</textarea>
+            </div>
+            <div class="field">
+              <label>Hosted image link (optional)</label>
+              <input name="imageUrl" type="text" value="${p ? esc(p.imageUrl||'') : ''}" placeholder="e.g. https://tukurani2018.github.io/boutique/images/cotton-sharee-1.jpg">
+              <div style="font-size:12.5px;color:#8a8072;margin-top:4px;">If your site is live (e.g. GitHub Pages) and you've added this photo as a file in your repo, paste its public link here. WhatsApp will then show a real photo preview in the enquiry message.</div>
             </div>
             <div class="error-msg" style="display:none;"></div>
             <div class="btn-row">
