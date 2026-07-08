@@ -352,7 +352,7 @@
   let state = {
     loading:true,
     loadError:null,
-    settings:null,
+    settings:{...DEFAULT_SETTINGS},
     categories:[],
     products:[],
     view:"store", // store | admin
@@ -380,7 +380,10 @@
   let configReady = false, productsReady = false, migrated = false;
 
   function finishInitialLoadIfReady(){
-    if(configReady && productsReady) state.loading = false;
+    // Show the store as soon as products have arrived. Settings/categories
+    // already have sane defaults, so we don't make people stare at a
+    // blank loading screen just because the config doc is a beat slower.
+    if(productsReady) state.loading = false;
     render();
   }
 
