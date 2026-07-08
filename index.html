@@ -363,6 +363,7 @@
 
   let state = {
     loading:true,
+    loadError:null,
     settings:null,
     categories:[],
     products:[],
@@ -416,29 +417,55 @@
     }
   }
 
+  function showLoadError(msg){
+    state.loading = false;
+    state.loadError = msg;
+    render();
+  }
+
   function initRealtimeSync(){
-    storeRef.onSnapshot(async (snap)=>{
-      if(!snap.exists){
-        await migrateLegacyDataIfNeeded(snap);
-        return; // the write above will re-trigger this listener with real data
+    // Watchdog: if Firestore hasn't answered within 10s, stop spinning forever
+    // and tell the person what to check instead.
+    const watchdog = setTimeout(()=>{
+      if(state.loading){
+        showLoadError("Still can't reach the database after 10 seconds. In the Firebase console, make sure Firestore Database is created (Build → Firestore Database → Create database) and that its Rules tab has been Published. Then reload this page.");
       }
-      const data = snap.data() || {};
-      state.settings = {...DEFAULT_SETTINGS, ...(data.settings||{})};
-      const rawCats = data.categories || [];
-      state.categories = rawCats.map(c => typeof c === 'string' ? {name:c, subs:[]} : {name:c.name, subs:c.subs||[]});
-      configReady = true;
-      finishInitialLoadIfReady();
+    }, 10000);
+
+    storeRef.onSnapshot(async (snap)=>{
+      try{
+        if(!snap.exists){
+          await migrateLegacyDataIfNeeded(snap);
+          return; // the write above will re-trigger this listener with real data
+        }
+        const data = snap.data() || {};
+        state.settings = {...DEFAULT_SETTINGS, ...(data.settings||{})};
+        const rawCats = data.categories || [];
+        state.categories = rawCats.map(c => typeof c === 'string' ? {name:c, subs:[]} : {name:c.name, subs:c.subs||[]});
+        state.loadError = null;
+        clearTimeout(watchdog);
+        configReady = true;
+        finishInitialLoadIfReady();
+      }catch(e){
+        console.error('Firestore setup/migration error:', e);
+        clearTimeout(watchdog);
+        showLoadError("Couldn't set up your store's database (permission denied). In the Firebase console, open Firestore Database → Rules, paste in open read/write rules for the 'stores' collection, and click Publish. Then reload this page.");
+      }
     }, (err)=>{
       console.error('Firestore settings listener error:', err);
-      alert("Couldn't connect to the database. Check your internet connection, or that Firestore is enabled for this Firebase project.");
+      clearTimeout(watchdog);
+      showLoadError("Couldn't connect to the database (" + (err && err.code ? err.code : 'unknown error') + "). Check that Firestore Database is created for this Firebase project and that your internet connection is working, then reload this page.");
     });
 
     productsRef.orderBy('createdAt','desc').onSnapshot((snap)=>{
       state.products = snap.docs.map(d=>({id:d.id, ...d.data()}));
       productsReady = true;
+      clearTimeout(watchdog);
       finishInitialLoadIfReady();
     }, (err)=>{
       console.error('Firestore products listener error:', err);
+      clearTimeout(watchdog);
+      showLoadError("Couldn't load products (" + (err && err.code ? err.code : 'unknown error') + "). Check your Firestore rules and internet connection, then reload this page.");
     });
   }
 
@@ -494,6 +521,28 @@
     });
   }
 
+  // ---------- Auto image hosting (ImgBB) ----------
+  // Free, no-credit-card image host. Get a key at https://api.imgbb.com/ and paste it below.
+  const IMGBB_API_KEY = "PASTE_YOUR_IMGBB_API_KEY_HERE";
+
+  async function uploadToImgbb(dataUrl){
+    if(!IMGBB_API_KEY || IMGBB_API_KEY.indexOf('PASTE_YOUR') === 0){
+      throw new Error('ImgBB API key not set');
+    }
+    const base64 = dataUrl.split(',')[1];
+    const body = new URLSearchParams();
+    body.append('image', base64);
+    const res = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, {
+      method: 'POST',
+      body
+    });
+    const json = await res.json();
+    if(!json.success || !json.data || !json.data.url){
+      throw new Error('ImgBB upload failed');
+    }
+    return json.data.url;
+  }
+
   // ---------- Filtering ----------
   function getFiltered(){
     let list = state.products.slice();
@@ -534,10 +583,10 @@
     if(action==='set-cat'){ state.activeCategory = t.dataset.cat; state.activeSubcategory='All'; render(); }
     if(action==='set-subcat'){ state.activeSubcategory = t.dataset.sub; render(); }
     if(action==='close-modal'){ state.modal=null; render(); }
-    if(action==='open-add-product'){ state.modal={type:'product', product:null, imgData:null}; render(); }
+    if(action==='open-add-product'){ state.modal={type:'product', product:null, imgData:null, imageUrl:''}; render(); }
     if(action==='edit-product'){
       const p = state.products.find(x=>x.id===t.dataset.id);
-      state.modal={type:'product', product:p, imgData:p?p.image:null};
+      state.modal={type:'product', product:p, imgData:p?p.image:null, imageUrl:p?(p.imageUrl||''):''};
       render();
     }
     if(action==='delete-product'){
@@ -573,49 +622,13 @@
       if(!p) return;
       const cur = state.settings.currency || "₹";
       const msg = buildEnquiryMessage(p, cur);
-      let handled = false;
-
-      if(p.imageUrl){
-        window.open(waLink(state.settings.whatsapp, msg), '_blank', 'noopener');
-        handled = true;
-      }
-
-      if(!handled && p.image && navigator.clipboard && window.ClipboardItem){
-        try{
-          const canvas = await generateCardImage(p, cur, state.settings.shopName);
-          const pngBlob = await new Promise(res=>canvas.toBlob(res, 'image/png'));
-          await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
-          const noteMsg = msg + `\n\n📋 (I've copied the product photo — pasting it in here!)`;
-          window.open(waLink(state.settings.whatsapp, noteMsg), '_blank', 'noopener');
-          handled = true;
-        }catch(e){
-          // clipboard copy isn't available/allowed here — fall back below
-        }
-      }
-
-      if(!handled && p.image && navigator.share){
-        try{
-          const canvas = await generateCardImage(p, cur, state.settings.shopName);
-          const blob = await new Promise(res=>canvas.toBlob(res, 'image/jpeg', 0.88));
-          const file = new File([blob], slugify(p.name)+'-card.jpg', {type:'image/jpeg'});
-          if(navigator.canShare && navigator.canShare({files:[file]})){
-            await navigator.share({ title:p.name, text:msg, files:[file] });
-            handled = true;
-          }
-        }catch(e){
-          // user cancelled the share sheet, or sharing isn't possible here — fall back below
-          if(e && e.name==='AbortError') handled = true;
-        }
-      }
-
-      if(!handled){
-        window.open(waLink(state.settings.whatsapp, msg), '_blank', 'noopener');
-      }
+      window.open(waLink(state.settings.whatsapp, msg), '_blank', 'noopener');
     }
     if(action==='remove-img'){
       const modal = document.getElementById('m-img-input');
       if(modal) modal.value='';
       state.modal.imgData = null;
+      state.modal.imageUrl = '';
       render();
     }
   });
@@ -725,6 +738,19 @@
         const data = await fileToCompressedDataURL(file);
         state.modal.imgData = data;
         render();
+        const statusEl = document.getElementById('photo-link-status');
+        if(statusEl) statusEl.textContent = 'Uploading photo to get a shareable link…';
+        try{
+          const hostedUrl = await uploadToImgbb(data);
+          state.modal.imageUrl = hostedUrl;
+          const urlInput = document.querySelector('#product-form input[name="imageUrl"]');
+          if(urlInput) urlInput.value = hostedUrl;
+          const statusEl2 = document.getElementById('photo-link-status');
+          if(statusEl2) statusEl2.textContent = 'Photo link ready ✓ — WhatsApp will show a real photo preview.';
+        }catch(err){
+          const statusEl3 = document.getElementById('photo-link-status');
+          if(statusEl3) statusEl3.textContent = "Couldn't auto-generate a link. You can paste one manually below, or leave it blank.";
+        }
       }
     }
     if(e.target.id==='product-category-select'){
@@ -755,97 +781,6 @@
     return `<svg class="tag-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41L11 3.83A2 2 0 009.6 3H4a1 1 0 00-1 1v5.6a2 2 0 00.59 1.41l9.58 9.58a2 2 0 002.83 0l4.59-4.59a2 2 0 000-2.83z"/><circle cx="7.5" cy="7.5" r="1.5"/></svg>`;
   }
 
-  const SHARE_SUPPORTED = typeof navigator !== 'undefined' && !!navigator.share;
-
-  function slugify(str){
-    return (str||'photo').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'') || 'photo';
-  }
-
-  function loadImage(src){
-    return new Promise((resolve,reject)=>{
-      const img = new Image();
-      img.onload = ()=>resolve(img);
-      img.onerror = reject;
-      img.src = src;
-    });
-  }
-
-  function wrapText(ctx, text, x, y, maxWidth, lineHeight){
-    const words = text.split(' ');
-    let line = '';
-    const lines = [];
-    for(const w of words){
-      const test = line + w + ' ';
-      if(ctx.measureText(test).width > maxWidth && line !== ''){
-        lines.push(line.trim());
-        line = w + ' ';
-      }else{
-        line = test;
-      }
-    }
-    if(line.trim()) lines.push(line.trim());
-    lines.forEach((l,i)=> ctx.fillText(l, x, y + i*lineHeight));
-    return lines.length;
-  }
-
-  async function generateCardImage(p, currency, shopName){
-    const W = 800, H = 1000, IMG_H = 620;
-    const canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
-    const ctx = canvas.getContext('2d');
-
-    ctx.fillStyle = '#FBF7F1';
-    ctx.fillRect(0,0,W,H);
-
-    if(p.image){
-      try{
-        const img = await loadImage(p.image);
-        const scale = Math.max(W/img.width, IMG_H/img.height);
-        const sw = W/scale, sh = IMG_H/scale;
-        const sx = (img.width - sw)/2, sy = (img.height - sh)/2;
-        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, W, IMG_H);
-      }catch(e){
-        ctx.fillStyle = '#F3ECE1';
-        ctx.fillRect(0,0,W,IMG_H);
-      }
-    }else{
-      ctx.fillStyle = '#F3ECE1';
-      ctx.fillRect(0,0,W,IMG_H);
-      ctx.fillStyle = '#6B6154';
-      ctx.font = 'italic 26px Georgia, serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('No image yet', W/2, IMG_H/2);
-      ctx.textAlign = 'left';
-    }
-
-    ctx.fillStyle = '#E4DACB';
-    ctx.fillRect(0, IMG_H, W, 2);
-
-    let y = IMG_H + 62;
-    const catLabel = [p.category, p.subcategory].filter(Boolean).join(' • ');
-    if(catLabel){
-      ctx.fillStyle = '#C98B7A';
-      ctx.font = '600 22px sans-serif';
-      ctx.fillText(catLabel.toUpperCase(), 40, y);
-      y += 44;
-    }
-
-    ctx.fillStyle = '#2B2620';
-    ctx.font = '600 42px Georgia, serif';
-    const nameLines = wrapText(ctx, p.name || '', 40, y, W-80, 50);
-    y += nameLines*50 + 18;
-
-    ctx.fillStyle = '#A9822C';
-    ctx.font = '600 38px Georgia, serif';
-    ctx.fillText(`${currency}${p.price}`, 40, y);
-
-    ctx.fillStyle = '#6B6154';
-    ctx.font = '400 20px sans-serif';
-    ctx.fillText(shopName || '', 40, H-40);
-
-    return canvas;
-  }
-
   function buildEnquiryMessage(p, currency){
     const lines = [];
     lines.push(`Hi! I'm interested in this product:`);
@@ -873,7 +808,7 @@
         <div class="card-price">${iconTag()}${currency}${p.price}</div>
         ${p.description ? `<div class="card-desc">${esc(p.description)}</div>` : ''}
         <button class="wa-btn" data-action="enquire-whatsapp" data-id="${p.id}">${iconWA()} Enquire on WhatsApp</button>
-        ${p.imageUrl ? `<div class="save-photo-btn">Opens your chat directly — the photo preview comes through automatically</div>` : (p.image ? `<div class="save-photo-btn">Opens your chat with us directly & copies the photo — just paste it in (long-press → Paste) and send</div>` : '')}
+        ${p.imageUrl ? `<div class="save-photo-btn">Opens your chat directly — the photo preview comes through automatically</div>` : ''}
       </div>
     </div>`;
   }
@@ -1138,9 +1073,9 @@
               <textarea name="description" placeholder="Fabric, fit, size notes...">${p ? esc(p.description||'') : ''}</textarea>
             </div>
             <div class="field">
-              <label>Hosted image link (optional)</label>
-              <input name="imageUrl" type="text" value="${p ? esc(p.imageUrl||'') : ''}" placeholder="e.g. https://tukurani2018.github.io/boutique/images/cotton-sharee-1.jpg">
-              <div style="font-size:12.5px;color:#8a8072;margin-top:4px;">If your site is live (e.g. GitHub Pages) and you've added this photo as a file in your repo, paste its public link here. WhatsApp will then show a real photo preview in the enquiry message.</div>
+              <label>Photo link (fills in automatically)</label>
+              <input name="imageUrl" type="text" value="${esc(state.modal.imageUrl||'')}" placeholder="Fills in automatically once you upload a photo above">
+              <div id="photo-link-status" style="font-size:12.5px;color:#8a8072;margin-top:4px;">${state.modal.imageUrl ? 'Photo link ready ✓ — WhatsApp will show a real photo preview.' : "Upload a photo above and this fills in on its own. You can also paste a link manually."}</div>
             </div>
             <div class="error-msg" style="display:none;"></div>
             <div class="btn-row">
@@ -1159,6 +1094,15 @@
     const root = document.getElementById('root');
     if(state.loading){
       root.innerHTML = `<div class="loading">Loading your catalog…</div>`;
+      return;
+    }
+    if(state.loadError){
+      root.innerHTML = `
+      <div class="loading" style="flex-direction:column;gap:14px;max-width:520px;margin:0 auto;text-align:center;padding:40px 20px;">
+        <div class="display" style="font-size:19px;color:var(--ink);">Couldn't load your catalog</div>
+        <div style="font-size:13.5px;line-height:1.6;">${esc(state.loadError)}</div>
+        <button class="btn btn-primary" onclick="location.reload()">Reload page</button>
+      </div>`;
       return;
     }
     root.innerHTML = state.view==='admin' ? adminHTML() : storeHTML();
