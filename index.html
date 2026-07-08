@@ -768,8 +768,45 @@
         subSelect.innerHTML = `<option value="">None</option>` + subs.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('');
         subSelect.disabled = subs.length===0;
       }
+      autoFillProductName();
+    }
+    if(e.target.id==='product-subcategory-select'){
+      autoFillProductName();
     }
   });
+
+  // ---------- Auto product naming: Sub-category + Category + serial number ----------
+  function titleCase(str){
+    return String(str||'').trim().toLowerCase().replace(/\b\w/g, ch=>ch.toUpperCase());
+  }
+  function nextSerialFor(category, subcategory, excludeId){
+    const matches = state.products.filter(p=>
+      p.id!==excludeId &&
+      (p.category||'')===(category||'') &&
+      (p.subcategory||'')===(subcategory||'')
+    );
+    return matches.length + 1;
+  }
+  function generateProductName(category, subcategory, excludeId){
+    if(!category && !subcategory) return '';
+    const serial = nextSerialFor(category, subcategory, excludeId);
+    const serialStr = String(serial).padStart(2,'0');
+    const parts = [];
+    if(subcategory) parts.push(titleCase(subcategory));
+    if(category) parts.push(titleCase(category));
+    parts.push(serialStr);
+    return parts.join(' ');
+  }
+  function autoFillProductName(){
+    const form = document.getElementById('product-form');
+    if(!form) return;
+    const nameInput = form.querySelector('input[name="name"]');
+    const catSelect = document.getElementById('product-category-select');
+    const subSelect = document.getElementById('product-subcategory-select');
+    if(!nameInput || !catSelect || !subSelect) return;
+    const excludeId = state.modal && state.modal.product ? state.modal.product.id : null;
+    nameInput.value = generateProductName(catSelect.value, subSelect.value, excludeId);
+  }
 
   // ---------- Renderers ----------
   function renderGridOnly(){
@@ -1076,10 +1113,6 @@
                 <input id="m-img-input" type="file" accept="image/*">
               </label>
             </div>
-            <div class="field">
-              <label>Product name</label>
-              <input name="name" type="text" value="${p ? esc(p.name) : ''}" placeholder="e.g. Banarasi Silk Saree">
-            </div>
             <div class="field-row">
               <div class="field">
                 <label>Category</label>
@@ -1095,6 +1128,11 @@
                   ${subsForSelectedCat.map(s=>`<option value="${esc(s)}" ${p&&p.subcategory===s?'selected':''}>${esc(s)}</option>`).join('')}
                 </select>
               </div>
+            </div>
+            <div class="field">
+              <label>Product name (auto-generated)</label>
+              <input name="name" type="text" readonly value="${esc(p ? p.name : generateProductName(p?p.category:'', p?p.subcategory:'', p?p.id:null))}" placeholder="Pick a category and sub-category above">
+              <div style="font-size:12px;color:#8a8072;margin-top:4px;">Built automatically as: Sub-category + Category + serial number. Change the fields above to update it.</div>
             </div>
             <div class="field">
               <label>Price (${state.settings.currency})</label>
