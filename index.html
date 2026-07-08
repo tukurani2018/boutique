@@ -5,6 +5,9 @@
 <title>Boutique Store</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,500&amp;family=Work+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<!-- Firebase (compat build - works with plain <script> tags, no bundler needed) -->
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <style>
   :root{
     --ivory:#FBF7F1;
@@ -280,14 +283,13 @@
           <div class="brand-block"><h1 class="shop-name">TUKURANI</h1><div class="shop-tagline">Admin</div></div>
           <div class="header-actions">
             <button class="icon-btn" data-action="go-store">View store</button>
-            <button class="btn btn-primary" style="padding:9px 14px;font-size:12.5px;" data-action="publish-download">Download updated site file</button>
             <button class="icon-btn" data-action="admin-logout">Log out</button>
           </div>
         </div>
       </header>
       <div class="admin-shell">
         <div style="background:var(--ivory-deep);border:1px solid var(--line);border-radius:var(--radius);padding:12px 16px;font-size:12.5px;color:var(--ink-soft);margin-bottom:20px;line-height:1.6;">
-          Your changes save automatically in this browser as you work. They won't show on your live site for customers until you click <strong>"Download updated site file"</strong> above and re-upload that file to wherever your site is hosted.
+          Changes save to the cloud instantly and appear live on your site for every visitor — no re-uploading needed.
         </div>
         <div class="tabs">
           <button class="tab active" data-action="admin-tab" data-tab="products">Products</button>
@@ -343,7 +345,21 @@
     currency:"₹",
     passcode:""
   };
-  const LS_KEY = "boutique-data-v1";
+
+  // ---------- Firebase ----------
+  const firebaseConfig = {
+    apiKey: "AIzaSyB41n4gbeXtPeTYfrL_AlmgDSAi-mQmcZk",
+    authDomain: "tukurani-53275.firebaseapp.com",
+    projectId: "tukurani-53275",
+    storageBucket: "tukurani-53275.firebasestorage.app",
+    messagingSenderId: "793479300141",
+    appId: "1:793479300141:web:f442094e97b4c38faee4a4"
+  };
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.firestore();
+  const STORE_ID = "main"; // single-store app; all data lives under this doc
+  const storeRef = db.collection('stores').doc(STORE_ID);
+  const productsRef = storeRef.collection('products');
 
   let state = {
     loading:true,
@@ -372,46 +388,76 @@
     return null;
   }
 
-  function loadAll(){
-    let saved = null;
-    try{ saved = JSON.parse(localStorage.getItem(LS_KEY)); }catch(e){ saved = null; }
-    const seed = getSeed();
-    const data = saved || seed || {};
-    state.settings = {...DEFAULT_SETTINGS, ...(data.settings||{})};
-    const rawCats = data.categories || [{name:"Sarees",subs:[]},{name:"Kurtis",subs:[]},{name:"Accessories",subs:[]}];
-    state.categories = rawCats.map(c => typeof c === 'string' ? {name:c, subs:[]} : {name:c.name, subs:c.subs||[]});
-    state.products = data.products || [];
-    state.loading = false;
+  let configReady = false, productsReady = false, migrated = false;
+
+  function finishInitialLoadIfReady(){
+    if(configReady && productsReady) state.loading = false;
     render();
   }
 
-  function persist(){
-    const data = {settings:state.settings, categories:state.categories, products:state.products};
-    try{
-      localStorage.setItem(LS_KEY, JSON.stringify(data));
-    }catch(e){
-      alert("Couldn't save your changes — your browser's storage is full. This usually happens after uploading many large photos. Try removing an older product image, or use smaller photos.");
+  // One-time migration: if this browser still has the old seed-data / localStorage
+  // catalog and Firestore is empty, push that data up to Firestore so nothing is lost.
+  async function migrateLegacyDataIfNeeded(configSnap){
+    if(migrated) return;
+    migrated = true;
+    if(configSnap.exists) return; // Firestore already has data — nothing to migrate
+    let legacy = null;
+    try{ legacy = JSON.parse(localStorage.getItem('boutique-data-v1')); }catch(e){}
+    if(!legacy) legacy = getSeed();
+    if(!legacy) legacy = {};
+    const settings = {...DEFAULT_SETTINGS, ...(legacy.settings||{})};
+    const rawCats = legacy.categories || [{name:"Sarees",subs:[]},{name:"Kurtis",subs:[]},{name:"Accessories",subs:[]}];
+    const categories = rawCats.map(c => typeof c === 'string' ? {name:c, subs:[]} : {name:c.name, subs:c.subs||[]});
+    await storeRef.set({settings, categories});
+    const legacyProducts = legacy.products || [];
+    for(const p of legacyProducts){
+      const {id, ...rest} = p;
+      await productsRef.doc(id || uid()).set(rest);
     }
   }
 
-  async function saveSettings(){ persist(); }
-  async function saveCategories(){ persist(); }
-  async function saveProducts(){ persist(); }
+  function initRealtimeSync(){
+    storeRef.onSnapshot(async (snap)=>{
+      if(!snap.exists){
+        await migrateLegacyDataIfNeeded(snap);
+        return; // the write above will re-trigger this listener with real data
+      }
+      const data = snap.data() || {};
+      state.settings = {...DEFAULT_SETTINGS, ...(data.settings||{})};
+      const rawCats = data.categories || [];
+      state.categories = rawCats.map(c => typeof c === 'string' ? {name:c, subs:[]} : {name:c.name, subs:c.subs||[]});
+      configReady = true;
+      finishInitialLoadIfReady();
+    }, (err)=>{
+      console.error('Firestore settings listener error:', err);
+      alert("Couldn't connect to the database. Check your internet connection, or that Firestore is enabled for this Firebase project.");
+    });
 
-  function downloadPublishedFile(){
-    const data = {settings:state.settings, categories:state.categories, products:state.products};
-    const doc = document.documentElement.cloneNode(true);
-    const seedEl = doc.querySelector('#seed-data');
-    if(seedEl) seedEl.textContent = JSON.stringify(data);
-    const html = '<!DOCTYPE html>\n' + doc.outerHTML;
-    const blob = new Blob([html], {type:'text/html'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'boutique-store.html';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    productsRef.orderBy('createdAt','desc').onSnapshot((snap)=>{
+      state.products = snap.docs.map(d=>({id:d.id, ...d.data()}));
+      productsReady = true;
+      finishInitialLoadIfReady();
+    }, (err)=>{
+      console.error('Firestore products listener error:', err);
+    });
+  }
+
+  async function saveSettings(){
+    try{ await storeRef.set({settings:state.settings}, {merge:true}); }
+    catch(e){ alert("Couldn't save settings. Check your internet connection and try again."); }
+  }
+  async function saveCategories(){
+    try{ await storeRef.set({categories:state.categories}, {merge:true}); }
+    catch(e){ alert("Couldn't save categories. Check your internet connection and try again."); }
+  }
+  async function addProductDoc(id, data){
+    await productsRef.doc(id).set(data);
+  }
+  async function updateProductDoc(id, data){
+    await productsRef.doc(id).set(data, {merge:true});
+  }
+  async function deleteProductDoc(id){
+    await productsRef.doc(id).delete();
   }
 
   function waLink(number, text){
@@ -496,9 +542,11 @@
     }
     if(action==='delete-product'){
       if(confirm('Delete this product? This cannot be undone.')){
-        state.products = state.products.filter(x=>x.id!==t.dataset.id);
-        await saveProducts();
-        render();
+        try{
+          await deleteProductDoc(t.dataset.id);
+        }catch(e){
+          alert("Couldn't delete this product. Check your internet connection and try again.");
+        }
       }
     }
     if(action==='delete-category'){
@@ -520,7 +568,6 @@
     }
     if(action==='admin-tab'){ state.adminTab = t.dataset.tab; render(); }
     if(action==='admin-logout'){ state.adminUnlocked=false; state.view='store'; render(); }
-    if(action==='publish-download'){ downloadPublishedFile(); }
     if(action==='enquire-whatsapp'){
       const p = state.products.find(x=>x.id===t.dataset.id);
       if(!p) return;
@@ -612,15 +659,22 @@
       if(!name || !price){ err.textContent='Name and price are required.'; err.style.display='block'; return; }
       const existing = state.modal.product;
       const image = state.modal.imgData || null;
-      if(existing){
-        const idx = state.products.findIndex(p=>p.id===existing.id);
-        state.products[idx] = {...existing, name, category, subcategory, price:Number(price), description, image, imageUrl};
-      }else{
-        state.products.unshift({ id:uid(), name, category, subcategory, price:Number(price), description, image, imageUrl, createdAt:Date.now() });
+      const submitBtn = form.querySelector('button[type="submit"]');
+      const originalLabel = submitBtn ? submitBtn.textContent : '';
+      if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'Saving…'; }
+      try{
+        if(existing){
+          await updateProductDoc(existing.id, { name, category, subcategory, price:Number(price), description, image, imageUrl });
+        }else{
+          await addProductDoc(uid(), { name, category, subcategory, price:Number(price), description, image, imageUrl, createdAt:Date.now() });
+        }
+        state.modal=null;
+        render();
+      }catch(e){
+        err.textContent = "Couldn't save this product. Check your internet connection and try again.";
+        err.style.display='block';
+        if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = originalLabel; }
       }
-      await saveProducts();
-      state.modal=null;
-      render();
     }
 
     if(form.id==='category-form'){
@@ -1014,14 +1068,13 @@
           <div class="brand-block"><h1 class="shop-name">${esc(state.settings.shopName)}</h1><div class="shop-tagline">Admin</div></div>
           <div class="header-actions">
             <button class="icon-btn" data-action="go-store">View store</button>
-            <button class="btn btn-primary" style="padding:9px 14px;font-size:12.5px;" data-action="publish-download">Download updated site file</button>
             <button class="icon-btn" data-action="admin-logout">Log out</button>
           </div>
         </div>
       </header>
       <div class="admin-shell">
         <div style="background:var(--ivory-deep);border:1px solid var(--line);border-radius:var(--radius);padding:12px 16px;font-size:12.5px;color:var(--ink-soft);margin-bottom:20px;line-height:1.6;">
-          Your changes save automatically in this browser as you work. They won't show on your live site for customers until you click <strong>"Download updated site file"</strong> above and re-upload that file to wherever your site is hosted.
+          Changes save to the cloud instantly and appear live on your site for every visitor — no re-uploading needed.
         </div>
         <div class="tabs">
           <button class="tab ${tab==='products'?'active':''}" data-action="admin-tab" data-tab="products">Products</button>
@@ -1111,7 +1164,7 @@
     root.innerHTML = state.view==='admin' ? adminHTML() : storeHTML();
   }
 
-  loadAll();
+  initRealtimeSync();
 })();
 </script>
 
